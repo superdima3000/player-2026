@@ -13,7 +13,7 @@ def create_one_freq_audio(freq, SMPL_RATE=44100, seconds=3, norma=32767):
 
 
 def create_tester(sec, freq, mode=2):
-    with wav_work.open('test.wav', mode='wb') as wav_file:
+    with wav_work.open('../test.wav', mode='wb') as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
         wav_file.setframerate(44100)

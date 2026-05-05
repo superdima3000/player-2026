@@ -1,29 +1,31 @@
-import collections
+import queue
 import sys
+import threading
 
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
-from filters import EllipticIIRFilter, TriangularFIRFilter
+from backend.filters import EllipticIIRFilter, TriangularFIRFilter
 
 
-class SingleThreadAudioBuffer:
+class DualThreadAudioBuffer:
     """
-    Однопоточный буфер воспроизведения с опциональным фильтром на выходе.
+    Двухпоточный буфер воспроизведения с опциональным фильтром на выходе.
 
-    Все действия (чтение файла, заполнение буфера, фильтрация, вывод)
-    происходят внутри callback sounddevice — в одном потоке.
+    Поток-продюсер читает файл и кладёт блоки в queue.Queue.
+    Callback sounddevice забирает блоки, фильтрует и передаёт звуковой карте.
 
     Схема обработки:
-        файл → _fill_buffer() → deque → filter.process() → звуковая карта
+        [Поток 1] файл → queue.put()
+        [Поток 2] queue.get() → filter.process() → звуковая карта
 
     Parameters
     ----------
     audio_file : str
         Путь к WAV-файлу.
     buffer_size : int
-        Максимальное число блоков в deque.
+        Максимальное число блоков в очереди.
     block_size : int
         Число сэмплов в одном блоке (рекомендуется 512–4096).
     filter : EllipticIIRFilter | TriangularFIRFilter | None
@@ -34,7 +36,7 @@ class SingleThreadAudioBuffer:
     def __init__(
         self,
         audio_file: str,
-        buffer_size: int = 64,
+        buffer_size: int = 8192,
         block_size: int = 1024,
         filter: "EllipticIIRFilter | TriangularFIRFilter | None" = None,
     ):
@@ -43,32 +45,33 @@ class SingleThreadAudioBuffer:
         self.block_size = block_size
         self.filter = filter
 
-        self._buffer: collections.deque = collections.deque()
+        self._ring_buffer: queue.Queue = queue.Queue(maxsize=buffer_size)
         self._underrun_count = 0
-        self._sf: sf.SoundFile | None = None
+        self._stop_event = threading.Event()
+        self._producer_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _fill_buffer(self) -> None:
-        """Читает из файла блоки до заполнения deque."""
-        while self._sf and len(self._buffer) < self.buffer_size:
-            block = self._sf.read(self.block_size, dtype="float32", always_2d=True)
-            if len(block) == 0:
-                self._sf.close()
-                self._sf = None
-                break
-            self._buffer.append(block)
+    def _producer(self) -> None:
+        """Поток 1: читает файл → кладёт блоки в очередь."""
+        try:
+            with sf.SoundFile(self.audio_file) as f:
+                while not self._stop_event.is_set():
+                    block = f.read(self.block_size, dtype="float32", always_2d=True)
+                    if len(block) == 0:
+                        break
+                    self._ring_buffer.put(block)  # блокируется если очередь полна
+        finally:
+            self._stop_event.set()
 
     def _callback(self, outdata, frames, time, status) -> None:
-        # 1. Пополнить буфер из файла
-        self._fill_buffer()
+        """Поток 2: забирает блок → фильтрует → отдаёт звуковой карте."""
+        try:
+            data = self._ring_buffer.get_nowait()
 
-        if self._buffer:
-            data = self._buffer.popleft()
-
-            # 2. Фильтрация блока
+            # Фильтрация блока
             if self.filter is not None:
                 data = self.filter.process(data, stateful=True).astype(np.float32)
 
@@ -77,11 +80,11 @@ class SingleThreadAudioBuffer:
                 outdata[len(data) :] = 0
                 raise sd.CallbackStop
             outdata[:] = data
-        else:
+        except queue.Empty:
             self._underrun_count += 1
             print(f"⚠ Underrun #{self._underrun_count}!", file=sys.stderr)
             outdata.fill(0)
-            if self._sf is None:
+            if self._stop_event.is_set():
                 raise sd.CallbackStop
 
     # ------------------------------------------------------------------
@@ -94,16 +97,18 @@ class SingleThreadAudioBuffer:
 
     def play(self) -> None:
         """Запускает воспроизведение, блокирует до конца файла."""
-        self._buffer = collections.deque()
+        self._ring_buffer = queue.Queue(maxsize=self.buffer_size)
+        self._stop_event = threading.Event()
         self._underrun_count = 0
         if self.filter is not None:
             self.filter.reset()
 
-        self._sf = sf.SoundFile(self.audio_file)
-        samplerate = self._sf.samplerate
-        channels = self._sf.channels
+        with sf.SoundFile(self.audio_file) as f:
+            samplerate = f.samplerate
+            channels = f.channels
 
-        self._fill_buffer()
+        self._producer_thread = threading.Thread(target=self._producer, daemon=True)
+        self._producer_thread.start()
 
         with sd.OutputStream(
             samplerate=samplerate,
@@ -111,15 +116,11 @@ class SingleThreadAudioBuffer:
             blocksize=self.block_size,
             dtype="float32",
             callback=self._callback,
-        ) as stream:
+        ):
             label = type(self.filter).__name__ if self.filter else "без фильтра"
-            print(f"▶ Однопоточный [{label}] | BUFFER_SIZE={self.buffer_size}")
-            while stream.active:
-                sd.sleep(10)
-
-        if self._sf:
-            self._sf.close()
-            self._sf = None
+            print(f"▶ Двухпоточный [{label}] | BUFFER_SIZE={self.buffer_size}")
+            self._stop_event.wait()
+            self._producer_thread.join()
 
         print(f"✅ Готово. Underrun: {self._underrun_count}")
 
@@ -129,9 +130,8 @@ class SingleThreadAudioBuffer:
 # ----------------------------------------------------------------------
 
 if __name__ == "__main__":
-    iir = EllipticIIRFilter(order=4, rp=1.0, rs=70.0,
-                             cutoff=4_000, btype="lowpass", fs=48_000)
-    fir = TriangularFIRFilter(numtaps=500, cutoff=4_000, btype="highpass", fs=48_000)
+    iir = EllipticIIRFilter(order=2, rp=1.0, rs=70.0, cutoff=100, btype="lowpass", fs=48_000)
+    fir = TriangularFIRFilter(btype="lowpass", numtaps=1000, cutoff=100, fs=48_000)
 
-    SingleThreadAudioBuffer("input.wav", buffer_size=64,
-                             block_size=1024, filter=fir).play()
+    DualThreadAudioBuffer("../input.wav", buffer_size=1,
+                          block_size=8128, filter=iir).play()
