@@ -43,6 +43,8 @@ class SingleThreadAudioBuffer:
         self.block_size = block_size
         self.filter = filter
 
+        self.start_frame: int = 0
+        self._frames_played: int = 0
         self._buffer: collections.deque = collections.deque()
         self._underrun_count = 0
         self._sf: sf.SoundFile | None = None
@@ -64,6 +66,8 @@ class SingleThreadAudioBuffer:
     def _callback(self, outdata, frames, time, status) -> None:
         # 1. Пополнить буфер из файла
         self._fill_buffer()
+        data = self._buffer.popleft()
+        self._frames_played += len(data)
 
         if self._buffer:
             data = self._buffer.popleft()
@@ -92,6 +96,10 @@ class SingleThreadAudioBuffer:
     def underrun_count(self) -> int:
         return self._underrun_count
 
+    @property
+    def frames_played(self) -> int:
+        return self._frames_played
+
     def play(self) -> None:
         """Запускает воспроизведение, блокирует до конца файла."""
         self._buffer = collections.deque()
@@ -100,6 +108,8 @@ class SingleThreadAudioBuffer:
             self.filter.reset()
 
         self._sf = sf.SoundFile(self.audio_file)
+        self._sf.seek(self.start_frame)
+        self._frames_played = 0
         samplerate = self._sf.samplerate
         channels = self._sf.channels
 

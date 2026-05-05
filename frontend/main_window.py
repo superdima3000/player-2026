@@ -1,6 +1,7 @@
 import threading
 import soundfile as sf
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout,
@@ -11,13 +12,25 @@ from backend.equalizer import Equalizer
 from backend.effects import EffectsChain
 from backend.player import AudioPlayer
 
+from frontend.windows.about_window import AboutWindow
+from frontend.windows.eq_window import EQWindow
+from frontend.windows.chorus_window import ChorusWindow
+from frontend.windows.vibrato_window import VibratoWindow
+from frontend.windows.spectrogram_window import SpectrogramWindow
+from frontend.windows.filter_settings_window import FilterSettingsWindow
+
+from pathlib import Path
+
+BASE_DIR = Path(__file__).parent
+
 
 class MainWindow(QMainWindow):
     _playback_finished = pyqtSignal()
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Player 2026")
+        self.setWindowTitle("Cool Skeleton EQ 4")
+        self.setWindowIcon(QIcon(str(BASE_DIR / "assets" / "logo.jpg")))
         self.setMinimumWidth(500)
 
         self._player: AudioPlayer | None = None
@@ -26,6 +39,23 @@ class MainWindow(QMainWindow):
         self._audio_file: str | None = None
         self._duration_sec: float = 0.0
         self._elapsed_sec: float = 0.0
+
+        self._windows: dict = {}
+        self._eq_gains: list[float] = [0.0] * 8
+
+        self._vibrato_enabled: bool = False
+        self._vibrato_depth: float = 5.0
+        self._vibrato_rate: float = 5.0
+
+        self._chorus_enabled: bool = False
+        self._chorus_depth: float = 10.0
+        self._chorus_rate: float = 1.5
+        self._chorus_mix: float = 0.5
+        self._chorus_voices: int = 3
+
+        self._paused_frame: int = 0
+        self._is_pausing: bool = False
+        self._samplerate: int = 44100
 
         self._playback_finished.connect(self._on_playback_finished)
 
@@ -41,6 +71,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self):
+        self._build_menu()
+
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
@@ -96,6 +128,50 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
+    def _build_menu(self):
+        menubar = self.menuBar()
+
+        # File
+        file_menu = menubar.addMenu("File")
+        file_menu.addAction("About", self._open_window("about"))
+        file_menu.addSeparator()
+        file_menu.addAction("Exit", self.close)
+
+        # Tools
+        tools_menu = menubar.addMenu("Tools")
+        tools_menu.addAction("EQ", self._open_window("eq"))
+        tools_menu.addAction("Chorus", self._open_window("chorus"))
+        tools_menu.addAction("Vibrato", self._open_window("vibrato"))
+
+        # Visual
+        visual_menu = menubar.addMenu("Visual")
+        visual_menu.addAction("Spectrogram", self._open_window("spectrogram"))
+
+        # Advanced
+        advanced_menu = menubar.addMenu("Advanced")
+        advanced_menu.addAction("Filter Settings", self._open_window("filter_settings"))
+
+    def _open_window(self, key: str):
+        """Фабрика — возвращает lambda для открытия нужного окна."""
+
+        def _open():
+            if key in self._windows and self._windows[key].isVisible():
+                self._windows[key].raise_()
+                self._windows[key].activateWindow()
+                return
+            window_map = {
+                "about": AboutWindow,
+                "eq": EQWindow,
+                "chorus": ChorusWindow,
+                "vibrato": VibratoWindow,
+                "spectrogram": SpectrogramWindow,
+                "filter_settings": FilterSettingsWindow,
+            }
+            self._windows[key] = window_map[key](self)
+            self._windows[key].show()
+
+        return _open
+
     # ------------------------------------------------------------------
     # Логика
     # ------------------------------------------------------------------
@@ -132,24 +208,41 @@ class MainWindow(QMainWindow):
         if not self._audio_file:
             return
 
+        with sf.SoundFile(self._audio_file) as f:
+            self._samplerate = f.samplerate
+
         eq = Equalizer(use_fir=True, fs=44100)
-        fx = EffectsChain(fs=44100)
+
+        fx = EffectsChain(fs=self._samplerate)
+        fx.vibrato_enabled = self._vibrato_enabled
+        fx.vibrato.depth_ms = self._vibrato_depth
+        fx.vibrato.rate_hz = self._vibrato_rate
+
+        fx.chorus_enabled = self._chorus_enabled
+        fx.chorus.depth_ms = self._chorus_depth
+        fx.chorus.rate_hz = self._chorus_rate
+        fx.chorus.mix = self._chorus_mix
+        fx.chorus.voices = self._chorus_voices
 
         self._player = AudioPlayer(
             audio_file=self._audio_file,
-            buffer_size=8192,
-            block_size=1024,
+            buffer_size=1,
+            block_size=8192,
             use_dual_thread=True,
             equalizer=eq,
             effects_chain=fx,
+            start_frame=self._paused_frame
         )
+
+        if "spectrogram" in self._windows and self._windows["spectrogram"].isVisible():
+            self._player.on_block = self._windows["spectrogram"].push_block
 
         # play() блокирует — запускаем в отдельном потоке
         self._play_thread = threading.Thread(
             target=self._play_worker, daemon=True
         )
         self._play_thread.start()
-
+        self._paused_frame = 0
         self._is_playing = True
         self._btn_play.setText("⏸ Пауза")
         self._timer.start()
@@ -163,15 +256,20 @@ class MainWindow(QMainWindow):
     def _pause(self):
         """Пауза — останавливаем поток воспроизведения."""
         if self._player:
+            self._is_pausing = True
+            self._paused_frame = self._player.current_frame
             self._player.stop()
         self._is_playing = False
         self._btn_play.setText("▶ Играть")
         self._timer.stop()
 
     def _stop(self):
+        self._is_pausing = False
         if self._player:
             self._player.stop()
         self._is_playing = False
+        self._paused_frame = 0
+        self._elapsed_sec = 0.0
         self._btn_play.setText("▶ Играть")
         self._timer.stop()
         self._elapsed_sec = 0.0
@@ -180,6 +278,9 @@ class MainWindow(QMainWindow):
 
     def _on_playback_finished(self):
         """Вызывается когда файл воспроизведён до конца."""
+        if self._is_pausing:
+            self._is_pausing = False
+            return
         self._is_playing = False
         self._btn_play.setText("▶ Играть")
         self._timer.stop()
@@ -188,9 +289,10 @@ class MainWindow(QMainWindow):
 
     def _tick(self):
         """Каждые 500 мс обновляем прогресс-бар."""
-        if not self._is_playing:
+        if not self._is_playing or self._player is None:
             return
-        self._elapsed_sec += 0.5
+            # Берём реальную позицию из плеера, а не накапливаем таймером
+        self._elapsed_sec = self._player.current_frame / self._samplerate
         if self._duration_sec > 0:
             pos = int(self._elapsed_sec / self._duration_sec * 1000)
             self._progress.setValue(min(pos, 1000))

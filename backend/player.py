@@ -1,5 +1,6 @@
 import soundfile as sf
 import numpy as np
+from typing import Callable
 
 from backend.single_thread_audio_buffer import SingleThreadAudioBuffer
 from backend.dual_thread_audio_buffer import DualThreadAudioBuffer
@@ -24,6 +25,7 @@ class AudioPlayer:
         self.effects_chain = effects_chain
         self.start_frame = start_frame
         self._frames_played = 0
+        self.on_block = None
 
         # Создаём нужный буфер — filter=None, обработку делаем сами
         if use_dual_thread:
@@ -123,7 +125,9 @@ class AudioPlayer:
         а нам нужно вклиниться между get() и outdata.
         Решение: подменяем filter на обёртку-пайплайн.
         """
-        pipeline = _ProcessingPipeline(self.equalizer, self.effects_chain)
+        self._buffer.start_frame = self.start_frame
+        self._buffer._frames_played = 0
+        pipeline = _ProcessingPipeline(self.equalizer, self.effects_chain, self.on_block)
         self._buffer.filter = pipeline
 
         if self.equalizer:
@@ -132,6 +136,10 @@ class AudioPlayer:
                     print(f"⚠ fs эквалайзера ({self.equalizer.fs}) != fs файла ({f.samplerate})")
 
         self._buffer.play()
+
+    @property
+    def current_frame(self) -> int:
+        return self.start_frame + self._buffer.frames_played
 
     def stop(self) -> None:
         # DualThreadAudioBuffer останавливается через stop_event
@@ -148,9 +156,10 @@ class _ProcessingPipeline:
     Мы просто реализуем этот метод.
     """
 
-    def __init__(self, equalizer: Equalizer | None, effects_chain: EffectsChain | None):
+    def __init__(self, equalizer: Equalizer | None, effects_chain: EffectsChain | None, on_block = None):
         self.equalizer = equalizer
         self.effects_chain = effects_chain
+        self._on_block = on_block
 
     def reset(self) -> None:
         if self.equalizer:
@@ -159,11 +168,18 @@ class _ProcessingPipeline:
             self.effects_chain.reset()
 
     def process(self, block, stateful: bool = True):
-        if self.equalizer:
-            block = self.equalizer.process(block)
-        if self.effects_chain:
-            block = self.effects_chain.process(block)
-        return block
+        try:
+            if self.equalizer:
+                block = self.equalizer.process(block)
+            if self.effects_chain:
+                block = self.effects_chain.process(block)
+            if self._on_block:
+                self._on_block(block)
+            return block
+        except Exception as e:
+            import sys
+            print(f"⚠ Pipeline error: {e}", file=sys.stderr)
+            return block
 
 
 # ----------------------------------------------------------------------

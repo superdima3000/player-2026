@@ -44,7 +44,8 @@ class DualThreadAudioBuffer:
         self.buffer_size = buffer_size
         self.block_size = block_size
         self.filter = filter
-
+        self.start_frame: int = 0  # ← плеер выставит перед play()
+        self._frames_played: int = 0
         self._ring_buffer: queue.Queue = queue.Queue(maxsize=buffer_size)
         self._underrun_count = 0
         self._stop_event = threading.Event()
@@ -58,10 +59,12 @@ class DualThreadAudioBuffer:
         """Поток 1: читает файл → кладёт блоки в очередь."""
         try:
             with sf.SoundFile(self.audio_file) as f:
+                f.seek(self.start_frame)
                 while not self._stop_event.is_set():
                     block = f.read(self.block_size, dtype="float32", always_2d=True)
                     if len(block) == 0:
                         break
+
                     self._ring_buffer.put(block)  # блокируется если очередь полна
         finally:
             self._stop_event.set()
@@ -74,6 +77,8 @@ class DualThreadAudioBuffer:
             # Фильтрация блока
             if self.filter is not None:
                 data = self.filter.process(data, stateful=True).astype(np.float32)
+
+            self._frames_played += len(data)
 
             if len(data) < len(outdata):
                 outdata[: len(data)] = data
@@ -94,6 +99,10 @@ class DualThreadAudioBuffer:
     @property
     def underrun_count(self) -> int:
         return self._underrun_count
+
+    @property
+    def frames_played(self) -> int:
+        return self._frames_played
 
     def play(self) -> None:
         """Запускает воспроизведение, блокирует до конца файла."""
