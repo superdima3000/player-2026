@@ -53,6 +53,14 @@ class MainWindow(QMainWindow):
         self._chorus_mix: float = 0.5
         self._chorus_voices: int = 3
 
+        self._filter_use_fir: bool = True
+        self._iir_order_lp: int = 6
+        self._iir_order_bp: int = 3
+        self._iir_order_hp: int = 6
+        self._fir_taps_lp: int = 1001
+        self._fir_taps_bp: int = 751
+        self._fir_taps_hp: int = 501
+
         self._paused_frame: int = 0
         self._is_pausing: bool = False
         self._samplerate: int = 44100
@@ -211,7 +219,8 @@ class MainWindow(QMainWindow):
         with sf.SoundFile(self._audio_file) as f:
             self._samplerate = f.samplerate
 
-        eq = Equalizer(use_fir=True, fs=44100)
+        eq = Equalizer(use_fir=self._filter_use_fir, fs=self._samplerate)
+        eq.set_gains(self._eq_gains)
 
         fx = EffectsChain(fs=self._samplerate)
         fx.vibrato_enabled = self._vibrato_enabled
