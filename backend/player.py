@@ -127,7 +127,7 @@ class AudioPlayer:
         """
         self._buffer.start_frame = self.start_frame
         self._buffer._frames_played = 0
-        pipeline = _ProcessingPipeline(self.equalizer, self.effects_chain, self.on_block)
+        pipeline = _ProcessingPipeline(self.equalizer, self.effects_chain, self)
         self._buffer.filter = pipeline
 
         if self.equalizer:
@@ -156,10 +156,10 @@ class _ProcessingPipeline:
     Мы просто реализуем этот метод.
     """
 
-    def __init__(self, equalizer: Equalizer | None, effects_chain: EffectsChain | None, on_block = None):
+    def __init__(self, equalizer: Equalizer | None, effects_chain: EffectsChain | None, player):
         self.equalizer = equalizer
         self.effects_chain = effects_chain
-        self._on_block = on_block
+        self._player = player
 
     def reset(self) -> None:
         if self.equalizer:
@@ -173,8 +173,9 @@ class _ProcessingPipeline:
                 block = self.equalizer.process(block)
             if self.effects_chain:
                 block = self.effects_chain.process(block)
-            if self._on_block:
-                self._on_block(block)
+            cb = self._player.on_block
+            if cb is not None:
+                cb(block)
             return block
         except Exception as e:
             import sys

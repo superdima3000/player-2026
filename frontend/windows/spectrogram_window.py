@@ -80,6 +80,7 @@ class SpectrogramWindow(QDialog):
 
     def push_block(self, block: np.ndarray):
         """Вызывается из аудио-потока — сохраняем блок для перерисовки."""
+        print(f"push_block called, block shape: {block.shape}")
         mono = block[:, 0] if block.ndim == 2 else block
         # Накапливаем в кольцевой буфер
         n = len(mono)
@@ -89,8 +90,9 @@ class SpectrogramWindow(QDialog):
 
     def _redraw(self):
         if self._pending is None:
+            print("_redraw: pending is None")
             return
-
+        print(f"_redraw: drawing spectrum")
         # FFT
         window = np.hanning(len(self._pending))
         spectrum = np.abs(np.fft.rfft(self._pending * window))

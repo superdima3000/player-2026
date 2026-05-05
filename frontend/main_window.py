@@ -234,8 +234,9 @@ class MainWindow(QMainWindow):
             start_frame=self._paused_frame
         )
 
-        if "spectrogram" in self._windows and self._windows["spectrogram"].isVisible():
-            self._player.on_block = self._windows["spectrogram"].push_block
+        spec = self._windows.get("spectrogram")
+        if spec and spec.isVisible():
+            self._player.on_block = spec.push_block
 
         # play() блокирует — запускаем в отдельном потоке
         self._play_thread = threading.Thread(
